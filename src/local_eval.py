@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Hashable, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 
 PartitionGraph = Mapping[str, Any]
@@ -98,9 +98,16 @@ def match_start_condition(vertex: Any, start_state: Any, query: QuerySpec) -> bo
     return vertex in allowed and start_state is not None
 
 
-def init_bindings(vertex: Any) -> Dict[str, Any]:
-    """Initialize λ for a start seed state."""
-    return {"seed_vertex": vertex}
+def init_bindings(vertex: Any, query: QuerySpec) -> Dict[str, Any]:
+    """Initialize λ for a start seed state.
+
+    For ``simple_path=True`` we explicitly seed ``visited_vertices`` with the
+    seed vertex itself so path-simplicity constraints are correct from depth 0.
+    """
+    bindings: Dict[str, Any] = {"seed_vertex": vertex}
+    if query.get("simple_path", False):
+        bindings["visited_vertices"] = [vertex]
+    return bindings
 
 
 def init_metadata(vertex: Any) -> Dict[str, Any]:
@@ -229,7 +236,16 @@ def materialize_fragment(state: SearchState, partition: PartitionGraph, query: Q
 
 
 def assign_fragment_type(payload: Mapping[str, Any], query: QuerySpec) -> FragmentType:
-    """Assign semantic fragment type using lightweight rules.
+    """Assign semantic fragment type using a provisional policy.
+
+    This policy is intentionally heuristic and isolated to this function so
+    future experiments can replace it without changing LocalEval control flow.
+    """
+    return _provisional_fragment_type_policy(payload, query)
+
+
+def _provisional_fragment_type_policy(payload: Mapping[str, Any], query: QuerySpec) -> FragmentType:
+    """Provisional typed-fragment policy (research placeholder).
 
     Placeholder policy (override later with learned/domain logic):
       - event fragment: event trace exists
@@ -247,20 +263,67 @@ def assign_fragment_type(payload: Mapping[str, Any], query: QuerySpec) -> Fragme
     return FragmentType.PATH
 
 
+def _normalize_for_hash(value: Any) -> Hashable:
+    """Normalize nested structures to stable hashable values."""
+    if isinstance(value, Mapping):
+        return tuple(sorted((str(k), _normalize_for_hash(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalize_for_hash(v) for v in value)
+    if isinstance(value, set):
+        return frozenset(_normalize_for_hash(v) for v in value)
+    return value if isinstance(value, Hashable) else repr(value)
+
+
+def fragment_signature(fragment: TypedFragment) -> Tuple[Hashable, ...]:
+    """Build a stronger deterministic signature for fragment deduplication.
+
+    Signature includes fragment type, frontier coordinates, boundary marker,
+    normalized bindings, and normalized metadata to reduce accidental merges of
+    semantically distinct fragments.
+    """
+    payload = fragment.payload
+    return (
+        fragment.fragment_type.value,
+        _normalize_for_hash(payload.get("vertex")),
+        _normalize_for_hash(payload.get("automaton_state")),
+        bool(payload.get("is_boundary", False)),
+        _normalize_for_hash(payload.get("bindings", {})),
+        _normalize_for_hash(payload.get("metadata", {})),
+    )
+
+
 def normalize_fragments(fragments: Sequence[TypedFragment]) -> List[TypedFragment]:
     """Normalize typed fragments (deduplicate by stable signature)."""
     dedup: Dict[Tuple[Any, ...], TypedFragment] = {}
     for fragment in fragments:
-        payload = fragment.payload
-        signature = (
-            fragment.fragment_type.value,
-            payload.get("vertex"),
-            payload.get("automaton_state"),
-            tuple(payload.get("metadata", {}).get("path", [])),
-            bool(payload.get("is_boundary", False)),
-        )
+        # Fragment normalization and stronger deduplication.
+        signature = fragment_signature(fragment)
         dedup[signature] = fragment
     return list(dedup.values())
+
+
+def state_memoization_key(state: SearchState, query: QuerySpec) -> Tuple[Hashable, ...]:
+    """Project search state to a finite memoization key for cycle safety.
+
+    Default projection uses ``(vertex, automaton_state)`` plus optional
+    user-selected fields from ``bindings``/``metadata``:
+      - ``query["memoization_binding_keys"]``
+      - ``query["memoization_metadata_keys"]``
+
+    The default intentionally excludes path-history fields (e.g. ``path``,
+    ``events``, ``visited_vertices``, ``depth``) so cyclic traversals cannot
+    keep generating infinitely many distinct keys when no depth bound is set.
+    """
+    binding_keys = query.get("memoization_binding_keys", [])
+    metadata_keys = query.get("memoization_metadata_keys", [])
+    selected_bindings = {key: state.bindings.get(key) for key in binding_keys}
+    selected_metadata = {key: state.metadata.get(key) for key in metadata_keys}
+    return (
+        _normalize_for_hash(state.vertex),
+        _normalize_for_hash(state.automaton_state),
+        _normalize_for_hash(selected_bindings),
+        _normalize_for_hash(selected_metadata),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +352,11 @@ def local_eval(
     # 1) Initialize fragment set 𝓕_i ← ∅ and 2) frontier 𝒮 ← ∅.
     typed_fragments: List[TypedFragment] = []
     frontier: List[SearchState] = []
+    visited_state_keys: Set[Tuple[Hashable, ...]] = set()
+
+    def emit_fragment(state: SearchState, *, boundary: bool) -> None:
+        payload = materialize_fragment(state, partition_graph, query, boundary=boundary)
+        typed_fragments.append(TypedFragment(assign_fragment_type(payload, query), payload))
 
     # Seed initialization.
     for vertex in iter_partition_vertices(partition_graph):
@@ -296,14 +364,32 @@ def local_eval(
             seed = SearchState(
                 vertex=vertex,
                 automaton_state=start_state,
-                bindings=init_bindings(vertex),
+                bindings=init_bindings(vertex, query),
                 metadata=init_metadata(vertex),
             )
+            # Seed acceptance check (zero-length match support).
+            if is_accepting_state(seed.automaton_state, automaton_spec):
+                emit_fragment(seed, boundary=False)
+
+            # Boundary handoff semantics: boundary states are cut points.
+            seed_is_boundary = is_boundary_state(seed.vertex, seed.metadata, partition_graph, query)
+            if seed_is_boundary:
+                emit_fragment(seed, boundary=True)
+                if not is_accepting_state(seed.automaton_state, automaton_spec):
+                    continue
+
             frontier.append(seed)
 
     # Automaton-guided exploration.
     while frontier:
         state = frontier.pop()
+
+        # Cycle / visited-state protection.
+        memo_key = state_memoization_key(state, query)
+        if memo_key in visited_state_keys:
+            continue
+        visited_state_keys.add(memo_key)
+
         for _, edge_label, dst, edge_meta in iter_admissible_edges(partition_graph, state.vertex):
             if not exists_transition(
                 state.automaton_state,
@@ -332,20 +418,21 @@ def local_eval(
                 metadata=next_metadata,
             )
 
-            if is_accepting_state(next_state.automaton_state, automaton_spec):
-                accepted_payload = materialize_fragment(next_state, partition_graph, query, boundary=False)
-                typed_fragments.append(
-                    TypedFragment(assign_fragment_type(accepted_payload, query), accepted_payload)
-                )
-            else:
-                frontier.append(next_state)
+            accepting = is_accepting_state(next_state.automaton_state, automaton_spec)
+            if accepting:
+                emit_fragment(next_state, boundary=False)
 
-            # Boundary fragment emission.
-            if is_boundary_state(next_state.vertex, next_state.metadata, partition_graph, query):
-                boundary_payload = materialize_fragment(next_state, partition_graph, query, boundary=True)
-                typed_fragments.append(
-                    TypedFragment(assign_fragment_type(boundary_payload, query), boundary_payload)
-                )
+            # Boundary handoff semantics.
+            boundary = is_boundary_state(next_state.vertex, next_state.metadata, partition_graph, query)
+            if boundary:
+                emit_fragment(next_state, boundary=True)
+                # Boundary acts as a handoff/cut point: do not continue expansion
+                # for non-accepting states beyond this local partition boundary.
+                if not accepting:
+                    continue
+
+            if not accepting:
+                frontier.append(next_state)
 
     # Fragment normalization.
     normalized = normalize_fragments(typed_fragments)
