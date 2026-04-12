@@ -1,22 +1,20 @@
-"""
-Research-oriented executable scaffold for Best-chain selection.
+"""Best-chain: optional post-processing over stitched candidate witnesses.
 
-This module implements a lightweight, optional post-processing layer that is
-*conceptually downstream* of Stitching in the distributed query pipeline:
+This module is intentionally **downstream** of the core distributed query
+pipeline:
 
-1. LocalEval produces local fragments.
-2. Stitching constructs admissible stitched candidate witnesses/chains.
-3. Best-chain filters, ranks, and selects among those admissible candidates.
+1. LocalEval creates partition-local fragments.
+2. Stitching composes admissible cross-partition candidate witnesses.
+3. Best-chain optionally ranks/prunes/selects among those already-constructed
+   candidates.
 
-Best-chain is therefore **not** equivalent to Stitching. Stitching is concerned
-with candidate construction under admissibility constraints, while Best-chain
-operates on the resulting candidate set to mitigate combinatorial growth and
-prioritize plausible witnesses.
+Important semantic boundary:
+- Best-chain is a post-processing optimization layer.
+- It does not determine witness validity.
+- It does not replace Stitching.
 
-The present implementation intentionally uses transparent placeholder scoring
-rules. It is designed as a stable scaffold for future replacement by formal
-optimization objectives (e.g., temporal continuity, identity consistency,
-automaton-based constraints, and cost-based optimization).
+Accordingly, this module only evaluates already-admissible candidates and does
+not perform witness construction, graph traversal, or automaton-run assembly.
 """
 
 from __future__ import annotations
@@ -27,7 +25,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 
 # ---------------------------------------------------------------------------
-# Lightweight structures and aliases
+# Lightweight types
 # ---------------------------------------------------------------------------
 
 Candidate = Mapping[str, Any]
@@ -35,25 +33,43 @@ Candidate = Mapping[str, Any]
 
 @dataclass(frozen=True)
 class BestChainConfig:
-    """Configuration for placeholder Best-chain behavior.
+    """Configurable, provisional policy for scoring and pruning.
 
-    The fields represent *temporary* scoring and pruning choices. They are not
-    intended to encode final semantics. Researchers can extend or replace this
-    configuration as formal ranking objectives mature.
+    The schema and weights here are placeholders for research iteration. They
+    should be treated as replaceable policy knobs, not finalized semantics.
     """
 
-    # Placeholder feature weights
-    weight_length: float = 1.0
-    weight_temporal_continuity: float = 2.0
-    weight_identity_continuity: float = 1.5
-    weight_automaton_consistency: float = 1.5
-    weight_semantic_completeness: float = 1.0
-    weight_gap_penalty: float = 1.0
-    weight_violation_penalty: float = 1.0
+    # Provisional scoring weights (all replaceable).
+    weight_continuity: float = 1.5
+    weight_completeness: float = 1.0
+    weight_consistency: float = 1.5
+    weight_length: float = 0.5
+    weight_penalty: float = 1.0
 
-    # Optional pruning thresholds
+    # Optional pruning controls; both disabled by default to keep behavior safe.
     min_score: Optional[float] = None
     max_candidates_after_prune: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ChainFeatures:
+    """Extracted placeholder features for an already-assembled candidate.
+
+    Expected candidate keys are intentionally lightweight and optional:
+    - fragments | segments | steps: sequence payload used for coarse length
+    - temporal_breaks: nonnegative proxy for temporal fragmentation
+    - identity_mismatches: nonnegative proxy for identity discontinuity
+    - automaton_violations: nonnegative proxy for run inconsistency
+    - coverage: [0, 1] proxy for structural/semantic completeness
+
+    Missing keys fall back to conservative defaults.
+    """
+
+    continuity_score: float
+    completeness_score: float
+    consistency_score: float
+    penalty_score: float
+    length_score: float
 
 
 DEFAULT_CONFIG = BestChainConfig()
@@ -63,101 +79,83 @@ DEFAULT_CONFIG = BestChainConfig()
 # Candidate feature extraction
 # ---------------------------------------------------------------------------
 
-def extract_chain_features(candidate: Candidate) -> dict[str, float]:
-    """Extract coarse placeholder features from a stitched candidate.
+def _to_nonnegative_float(value: Any, default: float = 0.0) -> float:
+    """Best-effort conversion to nonnegative float with safe fallback."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, numeric)
 
-    This helper deliberately supports heterogeneous candidate schemas. Where a
-    field is missing, a conservative default is used. The function does not
-    assert production-level semantics; it only defines a stable extraction
-    boundary to enable later replacement.
 
-    Expected (optional) candidate keys for this scaffold:
-      - ``fragments`` / ``segments`` / ``steps``: sequence-like chain payload
-      - ``temporal_breaks``: nonnegative number of discontinuities
-      - ``identity_mismatches``: nonnegative number of entity inconsistencies
-      - ``automaton_violations``: nonnegative number of automaton-level issues
-      - ``coverage``: [0, 1] proxy for semantic completeness
+def _clamp_01(value: Any, default: float = 1.0) -> float:
+    """Clamp value into [0, 1] for placeholder normalized features."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = default
+    return max(0.0, min(1.0, numeric))
 
-    Args:
-        candidate: A stitched candidate witness/chain represented as a mapping.
 
-    Returns:
-        Feature dictionary suitable for placeholder scoring.
+def extract_chain_features(candidate: Candidate) -> ChainFeatures:
+    """Extract provisional features from a stitched candidate.
+
+    This stage is intentionally schema-light and does not validate admissibility.
+    Admissibility is assumed to be enforced earlier by Stitching/constraints.
     """
+    # Candidate feature extraction
     chain_like: Any = (
         candidate.get("fragments")
         or candidate.get("segments")
         or candidate.get("steps")
         or []
     )
-    chain_length = float(len(chain_like) if isinstance(chain_like, Sequence) else 0)
+    length = float(len(chain_like) if isinstance(chain_like, Sequence) else 0)
 
-    temporal_breaks = float(candidate.get("temporal_breaks", 0.0))
-    identity_mismatches = float(candidate.get("identity_mismatches", 0.0))
-    automaton_violations = float(candidate.get("automaton_violations", 0.0))
+    temporal_breaks = _to_nonnegative_float(candidate.get("temporal_breaks"), default=0.0)
+    identity_mismatches = _to_nonnegative_float(candidate.get("identity_mismatches"), default=0.0)
+    automaton_violations = _to_nonnegative_float(candidate.get("automaton_violations"), default=0.0)
+    coverage = _clamp_01(candidate.get("coverage"), default=1.0)
 
-    raw_coverage = candidate.get("coverage", 1.0)
-    semantic_completeness = float(raw_coverage)
-    if semantic_completeness < 0.0:
-        semantic_completeness = 0.0
-    if semantic_completeness > 1.0:
-        semantic_completeness = 1.0
+    continuity = 1.0 / (1.0 + temporal_breaks)
+    consistency = 1.0 / (1.0 + identity_mismatches + automaton_violations)
+    penalty = temporal_breaks + identity_mismatches + automaton_violations
 
-    temporal_continuity = 1.0 / (1.0 + temporal_breaks)
-    identity_continuity = 1.0 / (1.0 + identity_mismatches)
-    automaton_consistency = 1.0 / (1.0 + automaton_violations)
-
-    return {
-        "length": chain_length,
-        "temporal_continuity": temporal_continuity,
-        "identity_continuity": identity_continuity,
-        "automaton_consistency": automaton_consistency,
-        "semantic_completeness": semantic_completeness,
-        "gap_count": temporal_breaks,
-        "violation_count": automaton_violations + identity_mismatches,
-    }
+    return ChainFeatures(
+        continuity_score=continuity,
+        completeness_score=coverage,
+        consistency_score=consistency,
+        penalty_score=penalty,
+        length_score=length,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Candidate scoring
 # ---------------------------------------------------------------------------
 
-def score_candidate(
-    candidate: Candidate,
-    config: Optional[BestChainConfig] = None,
-) -> float:
-    """Compute a placeholder score for a candidate chain.
+def score_candidate(candidate: Candidate, config: Optional[BestChainConfig] = None) -> float:
+    """Compute a provisional scalar score for candidate prioritization.
 
-    The score is a weighted linear combination of extracted features and simple
-    penalties. It is intentionally interpretable and easy to replace when
-    formal objective functions are introduced.
-
-    Args:
-        candidate: Candidate witness/chain generated by Stitching.
-        config: Optional scoring configuration.
-
-    Returns:
-        Numeric score where larger values indicate better candidates.
+    The scoring policy is intentionally modular and replaceable. It ranks
+    already-admissible candidates; it does not establish witness correctness.
     """
+    # Candidate scoring
     cfg = config or DEFAULT_CONFIG
-    f = extract_chain_features(candidate)
+    features = extract_chain_features(candidate)
 
     positive = (
-        cfg.weight_length * f["length"]
-        + cfg.weight_temporal_continuity * f["temporal_continuity"]
-        + cfg.weight_identity_continuity * f["identity_continuity"]
-        + cfg.weight_automaton_consistency * f["automaton_consistency"]
-        + cfg.weight_semantic_completeness * f["semantic_completeness"]
+        cfg.weight_continuity * features.continuity_score
+        + cfg.weight_completeness * features.completeness_score
+        + cfg.weight_consistency * features.consistency_score
+        + cfg.weight_length * features.length_score
     )
-    penalties = (
-        cfg.weight_gap_penalty * f["gap_count"]
-        + cfg.weight_violation_penalty * f["violation_count"]
-    )
+    penalties = cfg.weight_penalty * features.penalty_score
     return positive - penalties
 
 
 # ---------------------------------------------------------------------------
-# Candidate ranking / pruning
+# Candidate ranking
 # ---------------------------------------------------------------------------
 
 def compare_candidates(
@@ -165,17 +163,7 @@ def compare_candidates(
     right: Candidate,
     config: Optional[BestChainConfig] = None,
 ) -> int:
-    """Comparator for two candidates using placeholder descending score order.
-
-    Args:
-        left: First candidate.
-        right: Second candidate.
-        config: Optional scoring configuration.
-
-    Returns:
-        Negative if ``left`` should appear before ``right``, positive if after,
-        and 0 if tied.
-    """
+    """Comparator for descending score order with deterministic tie-breaks."""
     cfg = config or DEFAULT_CONFIG
     left_score = score_candidate(left, cfg)
     right_score = score_candidate(right, cfg)
@@ -185,12 +173,12 @@ def compare_candidates(
     if left_score < right_score:
         return 1
 
-    # Tie-breaker: prefer longer chains for deterministic ordering.
-    left_length = extract_chain_features(left)["length"]
-    right_length = extract_chain_features(right)["length"]
-    if left_length > right_length:
+    # Deterministic tie-break: prefer longer chain payload.
+    left_len = extract_chain_features(left).length_score
+    right_len = extract_chain_features(right).length_score
+    if left_len > right_len:
         return -1
-    if left_length < right_length:
+    if left_len < right_len:
         return 1
     return 0
 
@@ -199,42 +187,35 @@ def rank_candidates(
     candidates: Sequence[Candidate],
     config: Optional[BestChainConfig] = None,
 ) -> list[Candidate]:
-    """Return candidates sorted by descending placeholder quality.
+    """Rank already-assembled candidates from best to worst.
 
-    Args:
-        candidates: Candidate chains produced by Stitching.
-        config: Optional scoring configuration.
-
-    Returns:
-        New list sorted from highest to lowest score.
+    Empty input is valid and returns an empty list.
     """
+    # Candidate ranking
     cfg = config or DEFAULT_CONFIG
     return sorted(candidates, key=cmp_to_key(lambda a, b: compare_candidates(a, b, cfg)))
 
+
+# ---------------------------------------------------------------------------
+# Candidate pruning
+# ---------------------------------------------------------------------------
 
 def prune_candidates(
     candidates: Sequence[Candidate],
     config: Optional[BestChainConfig] = None,
 ) -> list[Candidate]:
-    """Prune weak candidates using lightweight threshold/cap controls.
+    """Optionally prune ranked candidates using explicit, configurable policy.
 
-    This stage is intentionally optional and conservative. It can be replaced by
-    principled admissibility-preserving pruning when objective semantics and
-    correctness guarantees are defined.
-
-    Args:
-        candidates: Input candidate chains.
-        config: Optional pruning/scoring configuration.
-
-    Returns:
-        Pruned list of candidates.
+    This pruning stage is a convenience for post-processing scale management.
+    It is not a validity predicate and must not be confused with admissibility.
     """
+    # Candidate pruning
     cfg = config or DEFAULT_CONFIG
     ranked = rank_candidates(candidates, cfg)
 
-    kept: list[Candidate] = ranked
+    kept = ranked
     if cfg.min_score is not None:
-        kept = [c for c in kept if score_candidate(c, cfg) >= cfg.min_score]
+        kept = [candidate for candidate in kept if score_candidate(candidate, cfg) >= cfg.min_score]
 
     if cfg.max_candidates_after_prune is not None:
         kept = kept[: cfg.max_candidates_after_prune]
@@ -243,82 +224,46 @@ def prune_candidates(
 
 
 # ---------------------------------------------------------------------------
-# Best-chain selection (public API)
+# Best-chain selection
 # ---------------------------------------------------------------------------
 
 def best_chain(
     candidates: Sequence[Candidate],
     config: Optional[BestChainConfig] = None,
 ) -> Optional[Candidate]:
-    """Return the best surviving candidate, or ``None`` if no candidate remains.
+    """Select one representative best candidate after optional pruning.
 
-    This function is the primary public entry point for optional Best-chain
-    post-processing. If disabled by callers, the framework can continue to run
-    using Stitching outputs directly.
-
-    Args:
-        candidates: Candidate chains from Stitching.
-        config: Optional ranking/pruning configuration.
-
-    Returns:
-        Highest-ranked candidate after pruning, else ``None``.
+    Best-chain remains optional: callers may bypass this function and consume
+    full Stitching outputs directly. Therefore, using or skipping this function
+    does not alter core soundness/completeness of witness construction.
     """
+    # Best-chain selection
     surviving = prune_candidates(candidates, config)
     return surviving[0] if surviving else None
 
 
 def top_k_chains(
     candidates: Sequence[Candidate],
-    k: int = 3,
+    k: int,
     config: Optional[BestChainConfig] = None,
 ) -> list[Candidate]:
-    """Return the top-k chains under the current placeholder objective.
+    """Return up to the top-k candidates after optional pruning.
 
-    Args:
-        candidates: Candidate chains from Stitching.
-        k: Number of top candidates to return (non-positive yields empty list).
-        config: Optional ranking/pruning configuration.
-
-    Returns:
-        List containing up to ``k`` highest-ranked surviving candidates.
+    This supports representative-set workflows when one witness is too narrow.
     """
+    # Optional top-k selection
     if k <= 0:
         return []
     return prune_candidates(candidates, config)[:k]
 
 
-if __name__ == "__main__":
-    # Small executable demonstration with schema-light mock candidates.
-    mock_candidates: list[Candidate] = [
-        {
-            "fragments": ["f1", "f2", "f3"],
-            "temporal_breaks": 0,
-            "identity_mismatches": 0,
-            "automaton_violations": 0,
-            "coverage": 0.9,
-        },
-        {
-            "segments": ["s1", "s2"],
-            "temporal_breaks": 1,
-            "identity_mismatches": 0,
-            "automaton_violations": 1,
-            "coverage": 0.7,
-        },
-    ]
-
-    best = best_chain(mock_candidates)
-    print("Best-chain selected:", best)
-    print("Top-2 chains:", top_k_chains(mock_candidates, k=2))
-
-
 # ---------------------------------------------------------------------------
-# Complexity and intended pipeline role
+# Complexity note (intended behavior, not formal guarantee)
 #
-# With N stitched candidates and per-candidate scoring cost sigma (σ):
-#   - scoring all candidates is O(N · σ)
-#   - ranking by full sort is O(N log N) after scoring
-#   - top-k currently uses full ranking; heap/selection optimizations are future work
-# Practical value: Best-chain reduces the candidate set propagated after
-# Stitching, especially when temporal fragmentation and border-node ambiguity
-# inflate admissible candidate counts.
+# If there are N candidate chains and scoring one candidate costs σ,
+# then full scoring costs O(N · σ).
+# Full ranking costs O(N log N) after scoring.
+# Top-k can later be optimized, but full sort is acceptable for now.
+# Practical benefit: Best-chain reduces/prioritizes candidates after Stitching;
+# it does not change the valid witness set constructed by core evaluation.
 # ---------------------------------------------------------------------------
