@@ -1,18 +1,16 @@
 """Algorithmic orchestration layer for distributed query evaluation.
 
-This module provides a runtime-neutral coordinator for a three-stage execution
-pipeline:
+This module models a *fragment assembly* pipeline, not a graph traversal engine.
+It keeps execution semantics explicit and runtime-neutral through four logical
+stages:
 
-1. LocalEval: partition-local fragment generation.
-2. Stitching: cross-partition witness assembly over boundary fragments.
-3. Best-chain: optional post-processing (e.g., ranking/pruning) over stitched
-   candidates.
+1. Map (LocalEval): partition-local fragment generation.
+2. Shuffle: boundary fragment exchange/collection for cross-partition assembly.
+3. Reduce (Stitching): constrained witness assembly from boundary fragments.
+4. Optional Reduce (Best-chain): ranking/pruning over selected witness scope.
 
-Design intent:
-- Keep control flow explicit and research-readable.
-- Preserve interchangeability of execution backends (single-process today,
-  Spark/GraphFrames/distributed runtime adapters later).
-- Avoid embedding infrastructure-specific assumptions in this module.
+The module intentionally avoids distributed runtime behavior (scheduling,
+transport, retries, fault tolerance). It only coordinates algorithmic stages.
 """
 
 from __future__ import annotations
@@ -29,15 +27,14 @@ Fragment = Dict[str, Any]
 QuerySpec = Mapping[str, Any]
 AutomatonSpec = Mapping[str, Any]
 Statistics = MutableMapping[str, Any]
+BestChainScope = str
+
+VALID_BEST_CHAIN_SCOPES = {"stitched_only", "local_only", "all"}
 
 
 @dataclass
 class QueryRunResult:
-    """Structured output of ``run_query``.
-
-    The dataclass keeps the module executable and explicit while remaining easy
-    to serialize via :meth:`as_dict` for downstream consumers.
-    """
+    """Structured output of ``run_query`` for stage-traceable research workflows."""
 
     local_fragments: List[Fragment]
     local_complete_witnesses: List[Fragment]
@@ -58,40 +55,167 @@ class QueryRunResult:
         }
 
 
-def _is_boundary_fragment(fragment: Mapping[str, Any]) -> bool:
-    """Detect whether a local fragment requires cross-partition stitching.
+@dataclass(frozen=True)
+class BoundaryClassification:
+    """Explicit boundary classification result for a LocalEval fragment.
 
-    Assumption (kept explicit): LocalEval emits a boolean ``is_boundary`` field
-    in fragment payloads for partial fragments touching partition boundaries.
-    If unavailable, this function conservatively treats fragments as complete.
+    Fields are intentionally extensible so future work can model multiple
+    boundary notions (e.g., temporal/spatial/structural) without changing the
+    orchestration skeleton.
     """
-    return bool(fragment.get("is_boundary", False))
+
+    is_boundary: bool
+    boundary_kind: str
+    missing_annotation: bool
+
+
+def classify_boundary_fragment(fragment: Mapping[str, Any]) -> BoundaryClassification:
+    """Classify a fragment for local-complete vs boundary routing.
+
+    Current contract:
+    - ``is_boundary`` (bool-like) controls routing.
+    - if ``is_boundary`` is absent, routing defaults to local-complete *and* the
+      missing annotation is surfaced via metadata for defensive auditing.
+
+    Future extension points:
+    - ``boundary_type`` could encode temporal/spatial/structural categories.
+    """
+    missing_annotation = "is_boundary" not in fragment
+    is_boundary = bool(fragment.get("is_boundary", False))
+    boundary_kind = str(fragment.get("boundary_type", "unspecified"))
+    return BoundaryClassification(
+        is_boundary=is_boundary,
+        boundary_kind=boundary_kind,
+        missing_annotation=missing_annotation,
+    )
 
 
 def split_fragments_for_stitching(
     fragments: Sequence[Fragment],
-) -> Tuple[List[Fragment], List[Fragment]]:
+) -> Tuple[List[Fragment], List[Fragment], Dict[str, Any]]:
     """Separate complete local witnesses from boundary fragments.
 
     Returns:
-        ``(local_complete_witnesses, boundary_fragments)``.
+        ``(local_complete_witnesses, boundary_fragments, boundary_diagnostics)``.
     """
     local_complete: List[Fragment] = []
     boundary: List[Fragment] = []
 
+    missing_boundary_annotation_count = 0
+    boundary_kind_counts: Dict[str, int] = {}
+
     for fragment in fragments:
-        if _is_boundary_fragment(fragment):
+        classification = classify_boundary_fragment(fragment)
+        if classification.missing_annotation:
+            missing_boundary_annotation_count += 1
+
+        boundary_kind_counts[classification.boundary_kind] = (
+            boundary_kind_counts.get(classification.boundary_kind, 0) + 1
+        )
+
+        if classification.is_boundary:
             boundary.append(fragment)
         else:
             local_complete.append(fragment)
 
-    return local_complete, boundary
+    diagnostics = {
+        "missing_boundary_annotation_count": missing_boundary_annotation_count,
+        "boundary_kind_counts": boundary_kind_counts,
+        "missing_boundary_annotation_detected": missing_boundary_annotation_count > 0,
+    }
+    return local_complete, boundary, diagnostics
 
 
-def _iter_partitions(partition_inputs: Iterable[Any]) -> Iterable[Any]:
-    """Yield partition-local inputs without constraining concrete container type."""
+def map_local_eval(
+    partition_inputs: Iterable[Any],
+    query: QuerySpec,
+    automaton: Optional[AutomatonSpec],
+) -> Tuple[List[Fragment], Statistics]:
+    """Map stage: run LocalEval independently for each partition.
+
+    LocalEval = partition-local fragment generation.
+    """
+    local_fragments: List[Fragment] = []
+    stats: Statistics = {"num_partitions": 0}
+
     for partition in partition_inputs:
-        yield partition
+        stats["num_partitions"] = int(stats["num_partitions"]) + 1
+        partition_fragments = local_eval(partition_graph=partition, query=query, automaton=automaton)
+        local_fragments.extend(partition_fragments)
+
+    return local_fragments, stats
+
+
+def shuffle_boundary_fragments(boundary_fragments: Sequence[Fragment]) -> List[Fragment]:
+    """Shuffle stage: collect fragments that cross partition boundaries.
+
+    This function keeps the Map -> Shuffle -> Reduce abstraction explicit without
+    introducing distributed transport mechanics.
+    """
+    # In a real distributed runtime this stage would exchange boundary fragments
+    # across workers/partitions. Here we preserve semantics by passing them
+    # through as an explicit orchestration stage.
+    return list(boundary_fragments)
+
+
+def reduce_stitching(
+    boundary_fragments: Sequence[Fragment],
+    stitching_constraints: Mapping[str, Any],
+) -> Tuple[List[Fragment], Optional[str]]:
+    """Reduce stage: invoke Stitching for cross-partition constrained assembly.
+
+    Stitching = cross-partition constrained assembly over boundary fragments.
+    """
+    stitched_witnesses: List[Fragment] = []
+    stitching_error: Optional[str] = None
+
+    if boundary_fragments:
+        try:
+            stitched_witnesses = stitch_fragments(list(boundary_fragments), dict(stitching_constraints))
+        except NotImplementedError as exc:
+            stitching_error = str(exc)
+
+    return stitched_witnesses, stitching_error
+
+
+def reduce_best_chain(
+    stitched_witnesses: Sequence[Fragment],
+    local_complete_witnesses: Sequence[Fragment],
+    *,
+    apply_best_chain: bool,
+    best_chain_scope: BestChainScope,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], List[Fragment]]:
+    """Optional Reduce stage: invoke Best-chain over selected witness scope.
+
+    Supported scopes:
+    - ``stitched_only``: rank/prune stitched witnesses (legacy default).
+    - ``local_only``: rank/prune local complete witnesses only.
+    - ``all``: rank/prune over union(local complete, stitched).
+    """
+    if best_chain_scope not in VALID_BEST_CHAIN_SCOPES:
+        raise ValueError(
+            f"Unsupported best_chain_scope={best_chain_scope!r}. "
+            f"Expected one of {sorted(VALID_BEST_CHAIN_SCOPES)}."
+        )
+
+    if best_chain_scope == "stitched_only":
+        candidates = list(stitched_witnesses)
+    elif best_chain_scope == "local_only":
+        candidates = list(local_complete_witnesses)
+    else:
+        candidates = list(local_complete_witnesses) + list(stitched_witnesses)
+
+    if not apply_best_chain or not candidates:
+        return None, None, candidates
+
+    best_chain_error: Optional[str] = None
+    best_result: Optional[Dict[str, Any]] = None
+    try:
+        best_result = best_chain(candidates)
+    except NotImplementedError as exc:
+        best_chain_error = str(exc)
+
+    return best_result, best_chain_error, candidates
 
 
 def run_query(
@@ -101,75 +225,40 @@ def run_query(
     *,
     stitching_constraints: Optional[Mapping[str, Any]] = None,
     apply_best_chain: bool = False,
+    best_chain_scope: BestChainScope = "stitched_only",
 ) -> Dict[str, Any]:
-    """Run the end-to-end algorithmic pipeline for distributed query semantics.
+    """Run the orchestration pipeline: LocalEval -> Stitching -> Best-chain.
 
-    Parameters:
-        partition_inputs: Iterable of partition-local graph inputs.
-        query: Query specification ``Q``.
-        automaton: Optional automaton ``𝒜``; if omitted, LocalEval may derive it
-            from ``query``.
-        stitching_constraints: Optional constraints used by Stitching.
-        apply_best_chain: Whether to invoke Best-chain on stitched candidates.
-
-    Returns:
-        A structured dictionary with stage-wise outputs and metadata.
+    Research semantics:
+    - LocalEval: partition-local fragment generation.
+    - Stitching: cross-partition constrained witness assembly.
+    - Best-chain: optional post-processing on configurable witness scope.
 
     Notes:
-        This function intentionally orchestrates algorithmic stages only. It does
-        not claim to implement distributed scheduling, fault tolerance, or data
-        transport layers.
+        This function orchestrates fragment assembly only. It does not model a
+        traversal runtime, distributed scheduler, or transport subsystem.
     """
     constraints: Mapping[str, Any] = stitching_constraints or {}
-    local_fragments: List[Fragment] = []
-    stats: Statistics = {"num_partitions": 0}
 
-    # Step 1: Partition-local fragment generation
-    # - for each partition P_i:
-    #   - call LocalEval(P_i, 𝒜, Q)
-    #   - collect fragment output 𝓕_i
-    for partition in _iter_partitions(partition_inputs):
-        stats["num_partitions"] = int(stats["num_partitions"]) + 1
-        partition_fragments = local_eval(partition_graph=partition, query=query, automaton=automaton)
-        local_fragments.extend(partition_fragments)
+    # Map stage (LocalEval per partition)
+    local_fragments, stats = map_local_eval(partition_inputs, query, automaton)
 
-    # Step 2: Local/global separation
-    # - identify:
-    #   - complete local witnesses that need no cross-partition assembly
-    #   - boundary fragments that must go to Stitching
-    local_complete_witnesses, boundary_fragments = split_fragments_for_stitching(local_fragments)
+    local_complete_witnesses, boundary_fragments, boundary_diagnostics = split_fragments_for_stitching(local_fragments)
 
-    # Step 3: Global stitching
-    # - call Stitching(𝓕^∂, 𝒜, Q)
-    # - obtain stitched cross-partition witnesses
-    stitched_witnesses: List[Fragment] = []
-    stitching_error: Optional[str] = None
-    if boundary_fragments:
-        try:
-            stitched_witnesses = stitch_fragments(boundary_fragments, dict(constraints))
-        except NotImplementedError as exc:
-            # Honest fallback for skeleton repositories where stitching logic
-            # is intentionally deferred to future runtime/integration layers.
-            stitching_error = str(exc)
+    # Shuffle stage (boundary fragment exchange)
+    shuffled_boundary_fragments = shuffle_boundary_fragments(boundary_fragments)
 
-    # Step 4: Optional post-processing
-    # - optionally apply Best-chain or another selection layer
-    best_result: Optional[Dict[str, Any]] = None
-    best_chain_error: Optional[str] = None
-    if apply_best_chain and stitched_witnesses:
-        try:
-            best_result = best_chain(stitched_witnesses)
-        except NotImplementedError as exc:
-            best_chain_error = str(exc)
+    # Reduce stage (Stitching)
+    stitched_witnesses, stitching_error = reduce_stitching(shuffled_boundary_fragments, constraints)
 
-    # Step 5: Final packaging
-    # - return a structured result with fields such as:
-    #   - local_fragments
-    #   - local_complete_witnesses
-    #   - boundary_fragments
-    #   - stitched_witnesses
-    #   - best_result
-    #   - metadata / statistics if available
+    # Optional Reduce stage (Best-chain)
+    best_result, best_chain_error, best_chain_candidates = reduce_best_chain(
+        stitched_witnesses,
+        local_complete_witnesses,
+        apply_best_chain=apply_best_chain,
+        best_chain_scope=best_chain_scope,
+    )
+
     metadata: Dict[str, Any] = {
         "statistics": {
             **stats,
@@ -177,27 +266,31 @@ def run_query(
             "num_local_complete_witnesses": len(local_complete_witnesses),
             "num_boundary_fragments": len(boundary_fragments),
             "num_stitched_witnesses": len(stitched_witnesses),
+            "num_best_chain_candidates": len(best_chain_candidates),
         },
         "stage_status": {
-            "stitching_attempted": bool(boundary_fragments),
-            "best_chain_attempted": bool(apply_best_chain and stitched_witnesses),
+            "stitching_attempted": bool(shuffled_boundary_fragments),
+            "best_chain_attempted": bool(apply_best_chain and best_chain_candidates),
             "stitching_error": stitching_error,
             "best_chain_error": best_chain_error,
+        },
+        "boundary_diagnostics": boundary_diagnostics,
+        "best_chain": {
+            "applied": apply_best_chain,
+            "scope": best_chain_scope,
+            "scope_description": {
+                "stitched_only": "Best-chain considers only stitched_witnesses.",
+                "local_only": "Best-chain considers only local_complete_witnesses.",
+                "all": "Best-chain considers union(local_complete_witnesses, stitched_witnesses).",
+            }[best_chain_scope],
         },
     }
 
     return QueryRunResult(
         local_fragments=local_fragments,
         local_complete_witnesses=local_complete_witnesses,
-        boundary_fragments=boundary_fragments,
+        boundary_fragments=shuffled_boundary_fragments,
         stitched_witnesses=stitched_witnesses,
         best_result=best_result,
         metadata=metadata,
     ).as_dict()
-
-
-# Module note:
-# This file is the algorithmic orchestration layer for the query framework.
-# True distributed execution details (e.g., Spark/GraphFrames scheduling,
-# partition transport, and fault-tolerant runtime mechanics) belong to later
-# integration layers. The current objective is semantic clarity and modularity.
