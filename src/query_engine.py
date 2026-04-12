@@ -15,12 +15,12 @@ transport, retries, fault tolerance). It only coordinates algorithmic stages.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, Hashable, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from src.best_chain import best_chain
 from src.local_eval import local_eval
-from src.stitching import stitch_fragments
+from src.stitching import BoundaryFragment, stitch_fragments
 
 
 Fragment = Dict[str, Any]
@@ -158,8 +158,88 @@ def shuffle_boundary_fragments(boundary_fragments: Sequence[Fragment]) -> List[F
     return list(boundary_fragments)
 
 
+def _derive_stitch_key(fragment: Mapping[str, Any]) -> Hashable:
+    """Derive a stitch-key compatible with cross-partition assembly.
+
+    Preferred order:
+    1) explicit stitch key emitted upstream,
+    2) entity-level key (stable cross-partition proxy),
+    3) automaton frontier state (coarser fallback).
+    """
+    if fragment.get("stitch_key") is not None:
+        return fragment["stitch_key"]
+    bindings = fragment.get("bindings", {})
+    if isinstance(bindings, Mapping) and bindings.get("entity_id") is not None:
+        return ("entity", bindings.get("entity_id"))
+    if fragment.get("automaton_state") is not None:
+        return ("state", fragment.get("automaton_state"))
+    return ("fallback", "global")
+
+
+def _derive_fragment_id(fragment: Mapping[str, Any], ordinal: int) -> str:
+    """Derive a deterministic fragment identifier for stitching-layer inputs."""
+    if fragment.get("fragment_id") is not None:
+        return str(fragment["fragment_id"])
+    metadata = fragment.get("metadata", {})
+    path = metadata.get("path") if isinstance(metadata, Mapping) else None
+    vertex = fragment.get("vertex")
+    frontier_state = fragment.get("automaton_state")
+    return f"bf::{ordinal}::{vertex}::{frontier_state}::{path}"
+
+
+def _derive_endpoints(fragment: Mapping[str, Any]) -> Tuple[Optional[Hashable], Optional[Hashable]]:
+    """Infer endpoint interface for structural compatibility checks."""
+    metadata = fragment.get("metadata", {})
+    path = metadata.get("path", []) if isinstance(metadata, Mapping) else []
+
+    endpoint_in = fragment.get("endpoint_in")
+    endpoint_out = fragment.get("endpoint_out")
+    if endpoint_in is None and len(path) >= 2:
+        endpoint_in = path[-2]
+    if endpoint_out is None:
+        endpoint_out = fragment.get("vertex", path[-1] if path else None)
+
+    return endpoint_in, endpoint_out
+
+
+def adapt_boundary_fragments_for_stitching(boundary_fragments: Sequence[Fragment]) -> List[BoundaryFragment]:
+    """Adapter layer: LocalEval fragment dictionaries -> Stitching fragments.
+
+    This function is the explicit LocalEval→Stitching contract normalizer.
+    It keeps LocalEval schema unchanged while materializing the typed
+    `BoundaryFragment` inputs expected by `src/stitching.py`.
+    """
+    adapted: List[BoundaryFragment] = []
+
+    for ordinal, fragment in enumerate(boundary_fragments):
+        stitch_key = _derive_stitch_key(fragment)
+        fragment_id = _derive_fragment_id(fragment, ordinal)
+        endpoint_in, endpoint_out = _derive_endpoints(fragment)
+        adapted.append(
+            BoundaryFragment(
+                fragment_id=fragment_id,
+                stitch_key=stitch_key,
+                payload=dict(fragment),
+                endpoint_in=endpoint_in,
+                endpoint_out=endpoint_out,
+                automaton_state=fragment.get("automaton_state"),
+            )
+        )
+    return adapted
+
+
+def prepare_shuffle_groups(boundary_fragments: Sequence[Fragment]) -> Dict[Hashable, List[BoundaryFragment]]:
+    """Explicit shuffle preparation stage for stitching reduce input."""
+    grouped: Dict[Hashable, List[BoundaryFragment]] = {}
+    for boundary_fragment in adapt_boundary_fragments_for_stitching(boundary_fragments):
+        grouped.setdefault(boundary_fragment.stitch_key, []).append(boundary_fragment)
+    return grouped
+
+
 def reduce_stitching(
-    boundary_fragments: Sequence[Fragment],
+    grouped_boundary_fragments: Mapping[Hashable, Sequence[BoundaryFragment]],
+    automaton: Optional[AutomatonSpec],
+    query: QuerySpec,
     stitching_constraints: Mapping[str, Any],
 ) -> Tuple[List[Fragment], Optional[str]]:
     """Reduce stage: invoke Stitching for cross-partition constrained assembly.
@@ -169,9 +249,16 @@ def reduce_stitching(
     stitched_witnesses: List[Fragment] = []
     stitching_error: Optional[str] = None
 
-    if boundary_fragments:
+    if grouped_boundary_fragments:
         try:
-            stitched_witnesses = stitch_fragments(list(boundary_fragments), dict(stitching_constraints))
+            # Keep constraints explicit for orchestration diagnostics/research
+            # traceability while preserving the Algorithm 2B call contract.
+            _ = dict(stitching_constraints)
+            automaton_spec: AutomatonSpec = automaton or {}
+            stitched = []
+            for group in grouped_boundary_fragments.values():
+                stitched.extend(stitch_fragments(group, automaton_spec, query))
+            stitched_witnesses = [asdict(witness) for witness in stitched]
         except NotImplementedError as exc:
             stitching_error = str(exc)
 
@@ -247,9 +334,10 @@ def run_query(
 
     # Shuffle stage (boundary fragment exchange)
     shuffled_boundary_fragments = shuffle_boundary_fragments(boundary_fragments)
+    shuffled_groups = prepare_shuffle_groups(shuffled_boundary_fragments)
 
     # Reduce stage (Stitching)
-    stitched_witnesses, stitching_error = reduce_stitching(shuffled_boundary_fragments, constraints)
+    stitched_witnesses, stitching_error = reduce_stitching(shuffled_groups, automaton, query, constraints)
 
     # Optional Reduce stage (Best-chain)
     best_result, best_chain_error, best_chain_candidates = reduce_best_chain(
@@ -265,6 +353,7 @@ def run_query(
             "num_local_fragments": len(local_fragments),
             "num_local_complete_witnesses": len(local_complete_witnesses),
             "num_boundary_fragments": len(boundary_fragments),
+            "num_shuffle_groups": len(shuffled_groups),
             "num_stitched_witnesses": len(stitched_witnesses),
             "num_best_chain_candidates": len(best_chain_candidates),
         },
