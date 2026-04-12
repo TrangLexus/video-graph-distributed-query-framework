@@ -119,6 +119,140 @@ Algorithm DistributedQueryEvalSpark(𝒫, 𝒜, Q)
 19: return Distinct(𝓦_local ∪ 𝓦_stitch)
 ```
 
+## Improved Stitching (Constraint-driven Assembly)
+
+To make Stitching more rigorous and implementation-ready, the framework separates:
+1. **partition-local fragment generation** (`LocalEval`), and
+2. **cross-partition constrained composition** (`StitchFragments`).
+
+This keeps local traversal automaton-guided, while making global composition explicitly constraint-driven.
+
+### Algorithm 2: Fragment Stitching (high-level)
+
+```text
+Input:
+    F           // set of fragments
+    Φ           // compatibility constraint system
+
+Output:
+    W           // set of query witnesses
+
+1: Initialize W ← ∅
+2: for each fragment F_1 in F do
+3:     Initialize candidate chain C ← {F_1}
+4:     Expand C by selecting fragment F_j such that Φ(C, F_j) holds
+5:     Recursively extend C while compatibility is satisfied
+6:     if C forms a complete witness then
+7:         Add C to W
+8:     end if
+9: end for
+10: return W
+```
+
+### Algorithm 2A: `LocalEval(P_i, 𝒜, Q)` — Automaton-guided Fragment Generation
+
+```text
+Input:
+• Partition P_i
+• Condition-Aware Automaton 𝒜
+• Query Q
+Output:
+• Set of typed fragments 𝓕_i
+
+1:  Initialize fragment set 𝓕_i ← ∅
+2:  Initialize search frontier 𝒮 ← ∅
+3:  for each vertex v ∈ V(P_i) do
+4:      if MatchStartCondition(v, q_0, Q) = true then
+5:          Create initial state s ← (v, q_0, InitBindings(v), InitMetadata(v))
+6:          𝒮 ← 𝒮 ∪ {s}
+7:      end if
+8:  end for
+9:  while 𝒮 is not empty do
+10:     Extract a state s = (v, q, λ, θ) from 𝒮
+11:     for each admissible edge e = (v, a, u) in P_i do
+12:         if ExistsTransition(q, a, u, e, 𝒜, Q) = true then
+13:             q' ← δ(q, a)
+14:             λ' ← UpdateBindings(λ, u, e, Q)
+15:             θ' ← UpdateMetadata(θ, u, e, q', Q)
+16:             if ViolatesLocalConstraints(λ', θ', Q) = false then
+17:                 s' ← (u, q', λ', θ')
+18:                 if IsAcceptingState(q', 𝒜) = true then
+19:                     F ← MaterializeFragment(s')
+20:                     AssignType(F, Q)
+21:                     𝓕_i ← 𝓕_i ∪ {F}
+22:                 else
+23:                     𝒮 ← 𝒮 ∪ {s'}
+24:                 end if
+25:             end if
+26:         end if
+27:     end for
+28:     if IsBoundaryState(s, P_i, Q) = true then
+29:         F ← MaterializeFragment(s)
+30:         AssignType(F, Q)
+31:         𝓕_i ← 𝓕_i ∪ {F}
+32:     end if
+33: end while
+34: return NormalizeFragments(𝓕_i)
+```
+
+**Academic interpretation of `LocalEval`:**
+- Operates strictly inside one partition.
+- Is driven by the CAA state transition system.
+- Emits both complete local fragments and boundary partial fragments for later stitching.
+
+Important detail:
+- `AssignType(F, Q)` is required so downstream stitching can enforce type-aware constraints across:
+  - path fragments,
+  - event fragments,
+  - interaction fragments,
+  - pattern fragments.
+
+### Algorithm 2B: `StitchFragments(G, 𝒜, Q)` — Constraint-Driven Assembly under CAA
+
+```text
+Input:
+• Fragment group G ⊆ 𝓕_border
+• Condition-Aware Automaton 𝒜
+• Query Q
+Output:
+• Set of complete query witnesses 𝓦_G
+
+1:  Initialize partial assemblies 𝒞 ← InitializeAssemblies(G)
+2:  Initialize complete witness set 𝓦_G ← ∅
+3:  while 𝒞 is not empty do
+4:      Extract a partial assembly C from 𝒞
+5:      if IsCompleteWitness(C, 𝒜, Q) = true then
+6:          𝓦_G ← 𝓦_G ∪ {C}
+7:          continue
+8:      end if
+9:      CandidateSet ← ExpandCandidates(C, G)
+10:     for each fragment F ∈ CandidateSet do
+11:         if SatisfyConstraintSystem(Φ(C, F, Q)) = true then
+12:             C' ← Stitch(C, F)
+13:             if PreserveAutomatonConsistency(C', 𝒜) = true then
+14:                 if PreserveClosure(C') = true then
+15:                     𝒞 ← 𝒞 ∪ {C'}
+16:                 end if
+17:             end if
+18:         end if
+19:     end for
+20: end while
+21: return DeduplicateWitnesses(𝓦_G)
+```
+
+**Why this stitching model is stronger:**
+- Stitching is treated as a **partial function** (only valid for compatible inputs).
+- Compatibility is not ad hoc; it is a formal **constraint system** `Φ`.
+- The same mechanism naturally extends from binary joins to **n-ary assembly**.
+
+Operationally:
+- `InitializeAssemblies(G)` seeds assembly search from single fragments or configured seeds.
+- `ExpandCandidates(C, G)` prunes to only potentially stitchable fragments.
+- `SatisfyConstraintSystem(Φ(C, F, Q))` checks hard semantic/temporal/topological constraints.
+- `Stitch(C, F)` applies the assembly operator (⊕).
+- `PreserveAutomatonConsistency` ensures the new assembly maps to a valid run of `𝒜`.
+- `PreserveClosure` ensures every intermediate result remains a legal fragment/partial witness.
+
 ### Practical implementation notes
 
 - Partition graph data by `(src_vertex_partition, time_bucket)` where possible to improve scan locality.
