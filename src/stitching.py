@@ -33,18 +33,27 @@ AutomatonSpec = Mapping[str, Any]
 
 @dataclass(frozen=True)
 class BoundaryFragment:
-    """A minimal boundary-fragment representation used by the stitching layer.
+    """Boundary-fragment interface consumed by cross-partition stitching.
 
-    Fields are intentionally generic to avoid assuming unavailable schema detail.
-    Integrators can extend this dataclass or replace it with richer domain types.
+    The schema mirrors richer LocalEval outputs while keeping stitching
+    independent from LocalEval internals. Explicit interface fields are used
+    first; `payload` remains as a compatibility fallback for older fragments.
     """
 
     fragment_id: str
     stitch_key: StitchKey
-    payload: Mapping[str, Any] = field(default_factory=dict)
+    fragment_type: Optional[str] = None
+    bindings: Mapping[str, Hashable] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    is_boundary: bool = True
+    entry_state: Optional[StateId] = None
+    exit_state: Optional[StateId] = None
     endpoint_in: Optional[Hashable] = None
     endpoint_out: Optional[Hashable] = None
-    automaton_state: Optional[StateId] = None
+    t_start: Optional[float] = None
+    t_end: Optional[float] = None
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    automaton_state: Optional[StateId] = None  # Backward-compatibility fallback.
 
 
 @dataclass
@@ -143,7 +152,7 @@ def initialize_assemblies(group: FragmentGroup) -> Deque[PartialAssembly]:
                 fragments=(fragment,),
                 trace={"seed": True},
                 expected_next_endpoint_in=fragment.endpoint_out,
-                frontier_state=fragment.automaton_state,
+                frontier_state=fragment.exit_state or fragment.automaton_state,
             )
         )
     return queue
@@ -163,77 +172,168 @@ def expand_candidates(assembly: PartialAssembly, group: FragmentGroup) -> List[B
 
 
 def check_temporal_consistency(assembly: PartialAssembly, candidate: BoundaryFragment) -> ConstraintCheckResult:
-    """Check lightweight temporal consistency.
-
-    Placeholder policy: if both fragments expose numeric `t_start` / `t_end`
-    values in payload, enforce non-decreasing progression from the assembly tail
-    to the candidate. Missing values are treated as unknown (not failure).
-    """
-
+    """Check temporal compatibility as a first-class admissibility dimension."""
+    # Temporal compatibility
     last = assembly.fragments[-1]
-    last_end = last.payload.get("t_end")
-    cand_start = candidate.payload.get("t_start")
-    if isinstance(last_end, (int, float)) and isinstance(cand_start, (int, float)):
-        ok = cand_start >= last_end
-        detail = f"candidate.t_start={cand_start} >= last.t_end={last_end}"
-        return ConstraintCheckResult(name="temporal_consistency", passed=ok, detail=detail)
+    last_start = last.t_start if last.t_start is not None else last.payload.get("t_start")
+    last_end = last.t_end if last.t_end is not None else last.payload.get("t_end")
+    cand_start = candidate.t_start if candidate.t_start is not None else candidate.payload.get("t_start")
+    cand_end = candidate.t_end if candidate.t_end is not None else candidate.payload.get("t_end")
+
+    if not all(isinstance(v, (int, float)) for v in (last_start, last_end, cand_start, cand_end)):
+        return ConstraintCheckResult(
+            name="temporal_consistency",
+            passed=False,
+            detail="missing or non-numeric t_start/t_end; strict fallback rejects unknown interval order",
+        )
+    if float(last_start) > float(last_end) or float(cand_start) > float(cand_end):
+        return ConstraintCheckResult(
+            name="temporal_consistency",
+            passed=False,
+            detail="invalid interval shape detected (t_start > t_end)",
+        )
+    ok = float(cand_start) >= float(last_end)
     return ConstraintCheckResult(
         name="temporal_consistency",
-        passed=True,
-        detail="insufficient temporal metadata; treated as unknown-compatible",
+        passed=ok,
+        detail=f"candidate.t_start={cand_start} >= last.t_end={last_end}",
     )
 
 
 def check_identity_consistency(assembly: PartialAssembly, candidate: BoundaryFragment) -> ConstraintCheckResult:
-    """Check identity-level consistency across stitched fragments.
-
-    If payload exposes `entity_id`, all observed entity identifiers in the
-    assembly and candidate must agree.
-    """
-
-    entity_ids = {f.payload.get("entity_id") for f in assembly.fragments if f.payload.get("entity_id") is not None}
-    cand_entity = candidate.payload.get("entity_id")
-    if cand_entity is not None:
-        entity_ids.add(cand_entity)
-    ok = len(entity_ids) <= 1
+    """Check identity compatibility using explicit `bindings` first."""
+    # Identity compatibility
+    merged: Dict[str, Hashable] = {}
+    for fragment in (*assembly.fragments, candidate):
+        source_bindings: Mapping[str, Hashable]
+        if fragment.bindings:
+            source_bindings = fragment.bindings
+        else:
+            fallback_entity = fragment.metadata.get("entity_id", fragment.payload.get("entity_id"))
+            source_bindings = {"entity_id": fallback_entity} if fallback_entity is not None else {}
+        for var, value in source_bindings.items():
+            if var in merged and merged[var] != value:
+                return ConstraintCheckResult(
+                    name="identity_consistency",
+                    passed=False,
+                    detail=f"binding conflict for {var}: {merged[var]} != {value}",
+                )
+            merged[var] = value
+    ok = bool(merged)
     return ConstraintCheckResult(
         name="identity_consistency",
         passed=ok,
-        detail=f"observed_entity_ids={sorted(entity_ids, key=str)}",
+        detail=f"merged_bindings={dict(sorted(merged.items(), key=lambda item: item[0]))}",
     )
 
 
 def check_structural_compatibility(assembly: PartialAssembly, candidate: BoundaryFragment) -> ConstraintCheckResult:
-    """Check structural endpoint compatibility for assembly extension."""
+    """Check structural endpoint compatibility for assembly extension.
 
+    Placeholder assumption: this skeleton models path-like interface matching
+    (`endpoint_out` of current tail to `endpoint_in` of candidate). N-ary
+    assembly is still supported through iterative extension of partials.
+    """
+    # Endpoint compatibility
     expected = assembly.expected_next_endpoint_in
-    if expected is not None and candidate.endpoint_in is not None and expected != candidate.endpoint_in:
+    cand_in = candidate.endpoint_in
+    if expected is None or cand_in is None:
         return ConstraintCheckResult(
             name="structural_compatibility",
             passed=False,
-            detail=f"expected endpoint_in={expected}, candidate.endpoint_in={candidate.endpoint_in}",
+            detail="missing endpoint interface fields; strict fallback rejects unknown adjacency",
+        )
+    if expected != cand_in:
+        return ConstraintCheckResult(
+            name="structural_compatibility",
+            passed=False,
+            detail=f"expected endpoint_in={expected}, candidate.endpoint_in={cand_in}",
         )
     return ConstraintCheckResult(
         name="structural_compatibility",
         passed=True,
-        detail="endpoint interface compatible under available metadata",
+        detail="endpoint_out -> endpoint_in interface matches",
     )
 
 
 def check_relation_fragment_compatibility(assembly: PartialAssembly, candidate: BoundaryFragment) -> ConstraintCheckResult:
-    """Check compatibility of relation/fragment type under placeholder semantics.
-
-    If payload contains `fragment_type`, do not allow immediate repetition of
-    the same type unless query explicitly allows it (see query checks).
-    """
-
-    last_type = assembly.fragments[-1].payload.get("fragment_type")
-    cand_type = candidate.payload.get("fragment_type")
-    repeated = last_type is not None and cand_type is not None and cand_type == last_type
+    """Check fragment-type / relation compatibility under conservative rules."""
+    last = assembly.fragments[-1]
+    last_type = last.fragment_type or str(last.payload.get("fragment_type")) if last.payload.get("fragment_type") is not None else None
+    cand_type = candidate.fragment_type or (
+        str(candidate.payload.get("fragment_type")) if candidate.payload.get("fragment_type") is not None else None
+    )
+    if last_type is None or cand_type is None:
+        return ConstraintCheckResult(
+            name="relation_fragment_compatibility",
+            passed=False,
+            detail="fragment_type unavailable; strict fallback rejects unknown relation semantics",
+        )
+    repeated = cand_type == last_type
     return ConstraintCheckResult(
         name="relation_fragment_compatibility",
         passed=not repeated,
         detail=f"last_type={last_type}, candidate_type={cand_type}",
+    )
+
+
+def check_automaton_progression_compatibility(
+    assembly: PartialAssembly, candidate: BoundaryFragment, automaton: AutomatonSpec
+) -> ConstraintCheckResult:
+    """Validate sequential automaton progression for one extension edge.
+
+    Explicitly uses `entry_state`/`exit_state` when available, with documented
+    fallback to `automaton_state` for legacy fragments.
+    """
+    # Automaton progression validation
+    left_state = assembly.frontier_state
+    if left_state is None:
+        tail = assembly.fragments[-1]
+        left_state = tail.exit_state or tail.automaton_state
+    right_entry = candidate.entry_state or candidate.automaton_state
+    right_exit = candidate.exit_state or candidate.automaton_state
+    if right_entry is None or right_exit is None:
+        return ConstraintCheckResult(
+            name="automaton_progression",
+            passed=False,
+            detail="candidate entry_state/exit_state unavailable; strict fallback rejects unknown progression",
+        )
+
+    allowed_states = automaton.get("allowed_states")
+    if allowed_states is not None:
+        allowed_state_set = set(allowed_states)
+        if right_entry not in allowed_state_set or right_exit not in allowed_state_set:
+            return ConstraintCheckResult(
+                name="automaton_progression",
+                passed=False,
+                detail=f"candidate states not in allowed_states: entry={right_entry}, exit={right_exit}",
+            )
+
+    if left_state is None:
+        return ConstraintCheckResult(
+            name="automaton_progression",
+            passed=False,
+            detail="assembly frontier_state unavailable; strict fallback rejects unknown progression",
+        )
+
+    transitions = automaton.get("allowed_transitions", [])
+    transition_set: Set[Tuple[StateId, StateId]] = set()
+    for transition in transitions:
+        if isinstance(transition, Sequence) and len(transition) == 2:
+            transition_set.add((transition[0], transition[1]))
+
+    if transition_set:
+        ok = (left_state, right_entry) in transition_set
+        return ConstraintCheckResult(
+            name="automaton_progression",
+            passed=ok,
+            detail=f"requires transition ({left_state} -> {right_entry})",
+        )
+    ok = left_state == right_entry
+    return ConstraintCheckResult(
+        name="automaton_progression",
+        passed=ok,
+        detail=f"fallback boundary state continuity ({left_state} == {right_entry})",
     )
 
 
@@ -256,28 +356,28 @@ def check_query_constraints(assembly: PartialAssembly, candidate: BoundaryFragme
     allow_same_type_adjacency = bool(query.get("allow_same_type_adjacency", False))
     required_entity_id = query.get("required_entity_id")
 
-    candidate_type = candidate.payload.get("fragment_type")
-    last_type = assembly.fragments[-1].payload.get("fragment_type")
-    candidate_entity = candidate.payload.get("entity_id")
+    candidate_type = candidate.fragment_type
+    last_type = assembly.fragments[-1].fragment_type
+    candidate_entity = candidate.bindings.get("entity_id", candidate.metadata.get("entity_id"))
+    type_allowed = candidate_type not in forbidden_types and (not required_types or candidate_type in required_types)
+    adjacency_allowed = allow_same_type_adjacency or (candidate_type != last_type)
+    entity_allowed = required_entity_id is None or candidate_entity == required_entity_id
+    boundary_allowed = candidate.is_boundary
 
-    type_allowed = (candidate_type is None or str(candidate_type) not in forbidden_types) and (
-        not required_types or (candidate_type is not None and str(candidate_type) in required_types)
-    )
-    adjacency_allowed = allow_same_type_adjacency or (candidate_type is None or last_type is None or candidate_type != last_type)
-    entity_allowed = required_entity_id is None or candidate_entity is None or candidate_entity == required_entity_id
-
-    ok = type_allowed and adjacency_allowed and entity_allowed
+    ok = type_allowed and adjacency_allowed and entity_allowed and boundary_allowed
     return ConstraintCheckResult(
         name="query_constraints",
         passed=ok,
         detail=(
             f"type_allowed={type_allowed}, adjacency_allowed={adjacency_allowed}, "
-            f"entity_allowed={entity_allowed}"
+            f"entity_allowed={entity_allowed}, boundary_allowed={boundary_allowed}"
         ),
     )
 
 
-def evaluate_constraint_system(assembly: PartialAssembly, candidate: BoundaryFragment, query: QuerySpec) -> ConstraintEvaluation:
+def evaluate_constraint_system(
+    assembly: PartialAssembly, candidate: BoundaryFragment, query: QuerySpec, automaton: AutomatonSpec
+) -> ConstraintEvaluation:
     """Structured constraint evaluation Φ(C, F, Q).
 
     Dimensions are evaluated explicitly:
@@ -296,6 +396,7 @@ def evaluate_constraint_system(assembly: PartialAssembly, candidate: BoundaryFra
         check_temporal_consistency(assembly, candidate),
         check_identity_consistency(assembly, candidate),
         check_structural_compatibility(assembly, candidate),
+        check_automaton_progression_compatibility(assembly, candidate, automaton),
         check_relation_fragment_compatibility(assembly, candidate),
         check_query_constraints(assembly, candidate, query),
     )
@@ -334,8 +435,8 @@ def preserve_automaton_consistency(assembly: PartialAssembly, automaton: Automat
         if state is not None and allowed is not None and state not in allowed:
             return False
 
-        entry_state = fragment.payload.get("entry_state")
-        exit_state = fragment.payload.get("exit_state")
+        entry_state = fragment.entry_state or fragment.payload.get("entry_state")
+        exit_state = fragment.exit_state or fragment.payload.get("exit_state")
         if allowed is not None:
             if entry_state is not None and entry_state not in allowed:
                 return False
@@ -343,8 +444,8 @@ def preserve_automaton_consistency(assembly: PartialAssembly, automaton: Automat
                 return False
 
     for left, right in zip(assembly.fragments, assembly.fragments[1:]):
-        left_exit = left.payload.get("exit_state", left.automaton_state)
-        right_entry = right.payload.get("entry_state", right.automaton_state)
+        left_exit = left.exit_state or left.payload.get("exit_state", left.automaton_state)
+        right_entry = right.entry_state or right.payload.get("entry_state", right.automaton_state)
         if left_exit is not None and right_entry is not None:
             if transition_set:
                 if (left_exit, right_entry) not in transition_set:
@@ -398,7 +499,7 @@ def stitch(assembly: PartialAssembly, candidate: BoundaryFragment) -> PartialAss
         fragments=new_fragments,
         trace=new_trace,
         expected_next_endpoint_in=candidate.endpoint_out,
-        frontier_state=candidate.payload.get("exit_state", candidate.automaton_state),
+        frontier_state=candidate.exit_state or candidate.payload.get("exit_state", candidate.automaton_state),
     )
 
 
@@ -420,7 +521,7 @@ def is_complete_witness(assembly: PartialAssembly, automaton: AutomatonSpec, que
         return size_ok and automaton_ok
 
     tail = assembly.fragments[-1]
-    tail_terminal = tail.payload.get("exit_state", tail.automaton_state)
+    tail_terminal = tail.exit_state or tail.payload.get("exit_state", tail.automaton_state)
     terminal_ok = tail_terminal in required_terminal_states if tail_terminal is not None else False
     return size_ok and automaton_ok and terminal_ok
 
@@ -488,7 +589,7 @@ def stitch_fragments(group: FragmentGroup, automaton: AutomatonSpec, query: Quer
         for candidate in candidates:
             # Structured constraint evaluation Φ
             # Query-aware compatibility checks
-            constraint_evaluation = evaluate_constraint_system(current, candidate, query)
+            constraint_evaluation = evaluate_constraint_system(current, candidate, query, automaton)
             if not constraint_evaluation.passed:
                 continue
 
