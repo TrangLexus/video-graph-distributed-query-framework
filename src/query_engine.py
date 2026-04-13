@@ -188,7 +188,13 @@ def _derive_fragment_id(fragment: Mapping[str, Any], ordinal: int) -> str:
 
 
 def _derive_endpoints(fragment: Mapping[str, Any]) -> Tuple[Optional[Hashable], Optional[Hashable]]:
-    """Infer endpoint interface for structural compatibility checks."""
+    """Infer endpoint interface for structural compatibility checks.
+
+    Fallback policy (used only when LocalEval did not emit explicit endpoints):
+    - prefer path-tail adjacency: endpoint_in := path[-2], endpoint_out := path[-1]
+    - if no path information exists, fall back to fragment ``vertex`` for
+      endpoint_out only.
+    """
     metadata = fragment.get("metadata", {})
     path = metadata.get("path", []) if isinstance(metadata, Mapping) else []
 
@@ -202,6 +208,25 @@ def _derive_endpoints(fragment: Mapping[str, Any]) -> Tuple[Optional[Hashable], 
     return endpoint_in, endpoint_out
 
 
+def _derive_temporal_interface(fragment: Mapping[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    """Infer conservative temporal interface for stitching compatibility.
+
+    LocalEval-provided ``t_start``/``t_end`` are preserved whenever present.
+    Only when absent do we consult metadata as a compatibility fallback.
+    """
+    t_start = fragment.get("t_start")
+    t_end = fragment.get("t_end")
+    if t_start is None:
+        metadata = fragment.get("metadata", {})
+        if isinstance(metadata, Mapping):
+            t_start = metadata.get("t_start", metadata.get("time_start"))
+    if t_end is None:
+        metadata = fragment.get("metadata", {})
+        if isinstance(metadata, Mapping):
+            t_end = metadata.get("t_end", metadata.get("time_end"))
+    return t_start, t_end
+
+
 def adapt_boundary_fragments_for_stitching(boundary_fragments: Sequence[Fragment]) -> List[BoundaryFragment]:
     """Adapter layer: LocalEval fragment dictionaries -> Stitching fragments.
 
@@ -212,16 +237,42 @@ def adapt_boundary_fragments_for_stitching(boundary_fragments: Sequence[Fragment
     adapted: List[BoundaryFragment] = []
 
     for ordinal, fragment in enumerate(boundary_fragments):
-        stitch_key = _derive_stitch_key(fragment)
-        fragment_id = _derive_fragment_id(fragment, ordinal)
+        # Boundary fragment adaptation: LocalEval dict -> typed Stitching input.
+        # Preservation of upstream interface fields is preferred over derivation.
+        stitch_key = fragment.get("stitch_key")
+        if stitch_key is None:
+            stitch_key = _derive_stitch_key(fragment)
+
+        fragment_id = fragment.get("fragment_id")
+        if fragment_id is None:
+            fragment_id = _derive_fragment_id(fragment, ordinal)
+
+        # Fallback derivation policy: use derivation only when LocalEval left
+        # endpoint interface values unspecified.
         endpoint_in, endpoint_out = _derive_endpoints(fragment)
+
+        # Preserve temporal handoff from LocalEval; derive conservative fallback
+        # only when t_start/t_end are missing.
+        t_start, t_end = _derive_temporal_interface(fragment)
+
+        bindings = fragment.get("bindings", {})
+        metadata = fragment.get("metadata", {})
+
         adapted.append(
             BoundaryFragment(
-                fragment_id=fragment_id,
+                fragment_id=str(fragment_id),
                 stitch_key=stitch_key,
+                fragment_type=fragment.get("fragment_type"),
+                bindings=dict(bindings) if isinstance(bindings, Mapping) else {},
+                metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
+                is_boundary=bool(fragment.get("is_boundary", True)),
+                entry_state=fragment.get("entry_state"),
+                exit_state=fragment.get("exit_state"),
                 payload=dict(fragment),
                 endpoint_in=endpoint_in,
                 endpoint_out=endpoint_out,
+                t_start=t_start,
+                t_end=t_end,
                 automaton_state=fragment.get("automaton_state"),
             )
         )
@@ -230,6 +281,8 @@ def adapt_boundary_fragments_for_stitching(boundary_fragments: Sequence[Fragment
 
 def prepare_shuffle_groups(boundary_fragments: Sequence[Fragment]) -> Dict[Hashable, List[BoundaryFragment]]:
     """Explicit shuffle preparation stage for stitching reduce input."""
+    # Shuffle preparation for stitching: group typed boundary fragments by
+    # stitch_key before reduce-stage invocation.
     grouped: Dict[Hashable, List[BoundaryFragment]] = {}
     for boundary_fragment in adapt_boundary_fragments_for_stitching(boundary_fragments):
         grouped.setdefault(boundary_fragment.stitch_key, []).append(boundary_fragment)
@@ -251,6 +304,8 @@ def reduce_stitching(
 
     if grouped_boundary_fragments:
         try:
+            # Reduce-stage stitching invocation: the orchestration layer delegates
+            # constrained cross-partition assembly to ``stitch_fragments``.
             # Keep constraints explicit for orchestration diagnostics/research
             # traceability while preserving the Algorithm 2B call contract.
             _ = dict(stitching_constraints)
