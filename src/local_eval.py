@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
+import json
 from typing import Any, Dict, Hashable, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 
@@ -23,10 +25,10 @@ Metadata = MutableMapping[str, Any]
 class FragmentType(str, Enum):
     """Typed fragment categories used by local evaluation."""
 
-    PATH = "path fragment"
-    EVENT = "event fragment"
-    INTERACTION = "interaction fragment"
-    PATTERN = "pattern fragment"
+    PATH = "path"
+    EVENT = "event"
+    INTERACTION = "interaction"
+    PATTERN = "pattern"
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ class LocalEvalResult:
 # ---------------------------------------------------------------------------
 # Helper utilities (lightweight placeholders; replace with domain semantics).
 # ---------------------------------------------------------------------------
+
 
 def iter_partition_vertices(partition: PartitionGraph) -> Iterable[Any]:
     """Yield partition vertices from common placeholder layouts."""
@@ -223,25 +226,82 @@ def is_boundary_state(vertex: Any, metadata: Metadata, partition: PartitionGraph
     return False
 
 
-def materialize_fragment(state: SearchState, partition: PartitionGraph, query: QuerySpec, *, boundary: bool) -> Dict[str, Any]:
-    """Materialize a fragment payload from the current search state."""
-    _ = partition, query
-    return {
-        "vertex": state.vertex,
-        "automaton_state": state.automaton_state,
-        "bindings": dict(state.bindings),
-        "metadata": dict(state.metadata),
-        "is_boundary": boundary,
+def _extract_time_value(value: Any) -> Optional[Any]:
+    """Extract a comparable temporal marker from loosely-typed values."""
+    if isinstance(value, Mapping):
+        for candidate_key in ("timestamp", "time", "ts", "t"):
+            if candidate_key in value:
+                return value[candidate_key]
+        return None
+    return value
+
+
+def extract_endpoints(state: SearchState) -> Tuple[Any, Any]:
+    """Extract conservative structural endpoints from current local path context."""
+    path = state.metadata.get("path", [])
+    endpoint_in = path[0] if isinstance(path, list) and path else state.vertex
+    endpoint_out = state.vertex
+    return endpoint_in, endpoint_out
+
+
+def extract_temporal_interface(state: SearchState) -> Tuple[Optional[Any], Optional[Any]]:
+    """Extract ``(t_start, t_end)`` and default to explicit ``None`` when unknown."""
+    metadata = state.metadata
+
+    explicit_start = metadata.get("t_start", metadata.get("time_start"))
+    explicit_end = metadata.get("t_end", metadata.get("time_end"))
+    if explicit_start is not None or explicit_end is not None:
+        return explicit_start, explicit_end
+
+    events = metadata.get("events", [])
+    temporal_points: List[Any] = []
+    if isinstance(events, list):
+        for event in events:
+            extracted = _extract_time_value(event)
+            if extracted is not None:
+                temporal_points.append(extracted)
+
+    if temporal_points:
+        return temporal_points[0], temporal_points[-1]
+    return None, None
+
+
+def _stable_json(data: Mapping[str, Any]) -> str:
+    """Stable JSON serialization used by deterministic ID/key helpers."""
+    return json.dumps(data, sort_keys=True, default=repr, separators=(",", ":"))
+
+
+def generate_fragment_id(payload: Mapping[str, Any]) -> str:
+    """Generate deterministic fragment identity from semantic interface fields."""
+    id_basis = {
+        "fragment_type": payload.get("fragment_type"),
+        "entry_state": payload.get("entry_state"),
+        "exit_state": payload.get("exit_state"),
+        "endpoint_in": payload.get("endpoint_in"),
+        "endpoint_out": payload.get("endpoint_out"),
+        "t_start": payload.get("t_start"),
+        "t_end": payload.get("t_end"),
+        "is_boundary": bool(payload.get("is_boundary", False)),
+        "vertex": payload.get("vertex"),
+        "bindings": payload.get("bindings", {}),
     }
+    digest = hashlib.sha1(_stable_json(id_basis).encode("utf-8")).hexdigest()
+    return f"frag_{digest[:16]}"
 
 
-def assign_fragment_type(payload: Mapping[str, Any], query: QuerySpec) -> FragmentType:
-    """Assign semantic fragment type using a provisional policy.
-
-    This policy is intentionally heuristic and isolated to this function so
-    future experiments can replace it without changing LocalEval control flow.
-    """
-    return _provisional_fragment_type_policy(payload, query)
+def generate_stitch_key(payload: Mapping[str, Any]) -> str:
+    """Generate deterministic stitch key for boundary/interface grouping."""
+    key_basis = {
+        "entry_state": payload.get("entry_state"),
+        "exit_state": payload.get("exit_state"),
+        "endpoint_in": payload.get("endpoint_in"),
+        "endpoint_out": payload.get("endpoint_out"),
+        "t_start": payload.get("t_start"),
+        "t_end": payload.get("t_end"),
+        "is_boundary": bool(payload.get("is_boundary", False)),
+    }
+    digest = hashlib.sha1(_stable_json(key_basis).encode("utf-8")).hexdigest()
+    return f"stitch_{digest[:16]}"
 
 
 def _provisional_fragment_type_policy(payload: Mapping[str, Any], query: QuerySpec) -> FragmentType:
@@ -253,6 +313,10 @@ def _provisional_fragment_type_policy(payload: Mapping[str, Any], query: QuerySp
       - pattern fragment: explicit pattern query mode
       - otherwise path fragment
     """
+    fragment_type_hint = payload.get("fragment_type")
+    if fragment_type_hint in {t.value for t in FragmentType}:
+        return FragmentType(fragment_type_hint)
+
     metadata = payload.get("metadata", {}) if isinstance(payload, Mapping) else {}
     if metadata.get("events"):
         return FragmentType.EVENT
@@ -261,6 +325,62 @@ def _provisional_fragment_type_policy(payload: Mapping[str, Any], query: QuerySp
     if query.get("mode") == "pattern":
         return FragmentType.PATTERN
     return FragmentType.PATH
+
+
+def assign_fragment_type(payload: Mapping[str, Any], query: QuerySpec) -> FragmentType:
+    """Assign semantic fragment type using an isolated provisional policy."""
+    return _provisional_fragment_type_policy(payload, query)
+
+
+def materialize_fragment_payload(
+    state: SearchState,
+    partition: PartitionGraph,
+    query: QuerySpec,
+    *,
+    boundary: bool,
+    entry_state: Any,
+    exit_state: Any,
+) -> Dict[str, Any]:
+    """Materialize fragment payload with explicit stitching-facing interface."""
+    _ = partition
+    endpoint_in, endpoint_out = extract_endpoints(state)
+    t_start, t_end = extract_temporal_interface(state)
+
+    metadata = dict(state.metadata)
+    metadata.setdefault("query_mode", query.get("mode"))
+    payload: Dict[str, Any] = {
+        "vertex": state.vertex,
+        "automaton_state": exit_state,
+        "entry_state": entry_state,
+        "exit_state": exit_state,
+        "endpoint_in": endpoint_in,
+        "endpoint_out": endpoint_out,
+        "t_start": t_start,
+        "t_end": t_end,
+        "bindings": dict(state.bindings),
+        "metadata": metadata,
+        "is_boundary": bool(boundary),
+    }
+    payload["fragment_type"] = assign_fragment_type(payload, query).value
+    payload["fragment_id"] = generate_fragment_id(payload)
+    payload["stitch_key"] = generate_stitch_key(payload)
+    return payload
+
+
+def materialize_fragment(state: SearchState, partition: PartitionGraph, query: QuerySpec, *, boundary: bool) -> Dict[str, Any]:
+    """Compatibility shim for historical callers.
+
+    New call sites should use ``materialize_fragment_payload`` for explicit
+    entry/exit semantics and boundary interface construction.
+    """
+    return materialize_fragment_payload(
+        state=state,
+        partition=partition,
+        query=query,
+        boundary=boundary,
+        entry_state=state.automaton_state,
+        exit_state=state.automaton_state,
+    )
 
 
 def _normalize_for_hash(value: Any) -> Hashable:
@@ -275,17 +395,20 @@ def _normalize_for_hash(value: Any) -> Hashable:
 
 
 def fragment_signature(fragment: TypedFragment) -> Tuple[Hashable, ...]:
-    """Build a stronger deterministic signature for fragment deduplication.
-
-    Signature includes fragment type, frontier coordinates, boundary marker,
-    normalized bindings, and normalized metadata to reduce accidental merges of
-    semantically distinct fragments.
-    """
+    """Build a stronger deterministic signature for fragment deduplication."""
     payload = fragment.payload
     return (
         fragment.fragment_type.value,
+        _normalize_for_hash(payload.get("fragment_id")),
+        _normalize_for_hash(payload.get("stitch_key")),
         _normalize_for_hash(payload.get("vertex")),
         _normalize_for_hash(payload.get("automaton_state")),
+        _normalize_for_hash(payload.get("entry_state")),
+        _normalize_for_hash(payload.get("exit_state")),
+        _normalize_for_hash(payload.get("endpoint_in")),
+        _normalize_for_hash(payload.get("endpoint_out")),
+        _normalize_for_hash(payload.get("t_start")),
+        _normalize_for_hash(payload.get("t_end")),
         bool(payload.get("is_boundary", False)),
         _normalize_for_hash(payload.get("bindings", {})),
         _normalize_for_hash(payload.get("metadata", {})),
@@ -296,7 +419,7 @@ def normalize_fragments(fragments: Sequence[TypedFragment]) -> List[TypedFragmen
     """Normalize typed fragments (deduplicate by stable signature)."""
     dedup: Dict[Tuple[Any, ...], TypedFragment] = {}
     for fragment in fragments:
-        # Fragment normalization and stronger deduplication.
+        # Fragment normalization and deduplication.
         signature = fragment_signature(fragment)
         dedup[signature] = fragment
     return list(dedup.values())
@@ -330,6 +453,7 @@ def state_memoization_key(state: SearchState, query: QuerySpec) -> Tuple[Hashabl
 # Main LocalEval routine.
 # ---------------------------------------------------------------------------
 
+
 def local_eval(
     partition_graph: PartitionGraph,
     query: QuerySpec,
@@ -354,8 +478,15 @@ def local_eval(
     frontier: List[SearchState] = []
     visited_state_keys: Set[Tuple[Hashable, ...]] = set()
 
-    def emit_fragment(state: SearchState, *, boundary: bool) -> None:
-        payload = materialize_fragment(state, partition_graph, query, boundary=boundary)
+    def emit_fragment(state: SearchState, *, boundary: bool, entry_state: Any, exit_state: Any) -> None:
+        payload = materialize_fragment_payload(
+            state=state,
+            partition=partition_graph,
+            query=query,
+            boundary=boundary,
+            entry_state=entry_state,
+            exit_state=exit_state,
+        )
         typed_fragments.append(TypedFragment(assign_fragment_type(payload, query), payload))
 
     # Seed initialization.
@@ -367,14 +498,25 @@ def local_eval(
                 bindings=init_bindings(vertex, query),
                 metadata=init_metadata(vertex),
             )
-            # Seed acceptance check (zero-length match support).
+            # Accepting fragment emission.
             if is_accepting_state(seed.automaton_state, automaton_spec):
-                emit_fragment(seed, boundary=False)
+                emit_fragment(
+                    seed,
+                    boundary=False,
+                    entry_state=seed.automaton_state,
+                    exit_state=seed.automaton_state,
+                )
 
-            # Boundary handoff semantics: boundary states are cut points.
+            # Boundary fragment emission.
             seed_is_boundary = is_boundary_state(seed.vertex, seed.metadata, partition_graph, query)
             if seed_is_boundary:
-                emit_fragment(seed, boundary=True)
+                # Boundary fragment interface construction.
+                emit_fragment(
+                    seed,
+                    boundary=True,
+                    entry_state=seed.automaton_state,
+                    exit_state=seed.automaton_state,
+                )
                 if not is_accepting_state(seed.automaton_state, automaton_spec):
                     continue
 
@@ -420,12 +562,24 @@ def local_eval(
 
             accepting = is_accepting_state(next_state.automaton_state, automaton_spec)
             if accepting:
-                emit_fragment(next_state, boundary=False)
+                # Accepting fragment emission.
+                emit_fragment(
+                    next_state,
+                    boundary=False,
+                    entry_state=state.automaton_state,
+                    exit_state=next_state.automaton_state,
+                )
 
-            # Boundary handoff semantics.
             boundary = is_boundary_state(next_state.vertex, next_state.metadata, partition_graph, query)
             if boundary:
-                emit_fragment(next_state, boundary=True)
+                # Boundary fragment emission.
+                # Boundary fragment interface construction.
+                emit_fragment(
+                    next_state,
+                    boundary=True,
+                    entry_state=state.automaton_state,
+                    exit_state=next_state.automaton_state,
+                )
                 # Boundary acts as a handoff/cut point: do not continue expansion
                 # for non-accepting states beyond this local partition boundary.
                 if not accepting:
@@ -434,7 +588,7 @@ def local_eval(
             if not accepting:
                 frontier.append(next_state)
 
-    # Fragment normalization.
+    # Fragment normalization and deduplication.
     normalized = normalize_fragments(typed_fragments)
     return LocalEvalResult(fragments=normalized).as_fragment_list()
 
