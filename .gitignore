@@ -70,3 +70,10 @@ Thumbs.db
 /results/
 # Downloaded and packaged source archives
 /packages/source_archives/
+# Project organization
+# Local legacy and working materials
+# Packaged archives
+# Notebook and Python cache
+**/*.pyc
+# Installer packages
+*.deb
