@@ -1,0 +1,27 @@
+{
+  "status": "PASS",
+  "root": "/home/hduser/VideoGraphDB_Project/src/Vr15_profile_benchmark_C2",
+  "num_query_specs": 12,
+  "queries": [
+    "Q1.1",
+    "Q1.2",
+    "Q1.3",
+    "Q2.1",
+    "Q2.2",
+    "Q2.3",
+    "Q3.1",
+    "Q3.2",
+    "Q3.3",
+    "Q4.1",
+    "Q4.2",
+    "Q4.3"
+  ],
+  "errors": [],
+  "notes": [
+    "Boundary join complexity: O(I*K*|F| + |J|), với I nhỏ và K=12.",
+    "Support selection: typed-identity semi-join O(|F|+|B|), output-sensitive.",
+    "LocalEval wall time: max completion offset; work-sum chỉ diagnostic.",
+    "Không dựng compact entity index O(|V|) vì 12 evaluator hiện tại không sử dụng.",
+    "Static audit không thay thế Spark/HDFS correctness và scalability tests."
+  ]
+}

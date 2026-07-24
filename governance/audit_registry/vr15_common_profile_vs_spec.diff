@@ -1,0 +1,26 @@
+--- src/candidates/vr15/profile_benchmark_c2/query_specs/common.py	2026-07-24 06:07:32.477946221 +0700
++++ src/candidates/vr15/spec_compliant_optimized_v4/query_specs/common.py	2026-07-24 00:21:51.000000000 +0700
+@@ -13,7 +13,7 @@
+ import os
+ from collections import deque
+ from dataclasses import dataclass, field
+-from typing import Callable, Mapping, Sequence, Tuple
++from typing import Callable, Mapping, Sequence
+ 
+ from pyspark.sql import Column, DataFrame
+ from pyspark.sql import functions as F
+@@ -26,11 +26,11 @@
+ # temporal_mode thuộc {FORWARD, ABSOLUTE}.
+ # State pair có thể là transition trực tiếp hoặc hai đầu của một automaton path
+ # có các role còn thiếu được Stitching bổ sung ở giữa.
+-BoundaryInterface = Tuple[
++BoundaryInterface = tuple[
+     str,
+     str,
+-    Tuple[str, ...],
+-    Tuple[str, ...],
++    tuple[str, ...],
++    tuple[str, ...],
+     str,
+     str,
+     str,

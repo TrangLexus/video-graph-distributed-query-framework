@@ -1,0 +1,13 @@
+Only in src/candidates/vr15/profile_benchmark_c2: CHANGELOG_Vr15.md
+Only in src/candidates/vr15/spec_compliant_optimized_v4: check_project_compatibility.py
+Only in src/candidates/vr15/profile_benchmark_c2: config.py
+Only in src/candidates/vr15/spec_compliant_optimized_v4: DESIGN_AND_COMPLEXITY.md
+Only in src/candidates/vr15/profile_benchmark_c2: graph_io.py
+Only in src/candidates/vr15/profile_benchmark_c2: queries.py
+Files src/candidates/vr15/profile_benchmark_c2/query_specs/common.py and src/candidates/vr15/spec_compliant_optimized_v4/query_specs/common.py differ
+Only in src/candidates/vr15/spec_compliant_optimized_v4: README_APPLY_AND_VERIFY.md
+Only in src/candidates/vr15/profile_benchmark_c2: README_Vr15.md
+Only in src/candidates/vr15/profile_benchmark_c2: scripts
+Only in src/candidates/vr15/spec_compliant_optimized_v4: SHA256SUMS.txt
+Files src/candidates/vr15/profile_benchmark_c2/STATIC_AUDIT_REPORT.json and src/candidates/vr15/spec_compliant_optimized_v4/STATIC_AUDIT_REPORT.json differ
+Only in src/candidates/vr15/profile_benchmark_c2: STATIC_VALIDATION_Vr15.md

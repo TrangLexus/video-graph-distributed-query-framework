@@ -1,0 +1,22 @@
+Only in src/candidates/vr15/spec_compliant_optimized_v4: audit_vr15_static.py
+Files src/candidates/vr15/spec_compliant_optimized_v4/baseline.py and src/candidates/vr15/complete_fixed_bundle/baseline.py differ
+Only in src/candidates/vr15/spec_compliant_optimized_v4: check_project_compatibility.py
+Only in src/candidates/vr15/spec_compliant_optimized_v4: DESIGN_AND_COMPLEXITY.md
+Files src/candidates/vr15/spec_compliant_optimized_v4/proposed_distributed.py and src/candidates/vr15/complete_fixed_bundle/proposed_distributed.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/common.py and src/candidates/vr15/complete_fixed_bundle/query_specs/common.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q11.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q11.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q12.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q12.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q13.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q13.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q21.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q21.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q22.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q22.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q23.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q23.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q31.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q31.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q32.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q32.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q33.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q33.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q41.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q41.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q42.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q42.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/query_specs/q43.py and src/candidates/vr15/complete_fixed_bundle/query_specs/q43.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/README_APPLY_AND_VERIFY.md and src/candidates/vr15/complete_fixed_bundle/README_APPLY_AND_VERIFY.md differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/run_experiment.py and src/candidates/vr15/complete_fixed_bundle/run_experiment.py differ
+Files src/candidates/vr15/spec_compliant_optimized_v4/SHA256SUMS.txt and src/candidates/vr15/complete_fixed_bundle/SHA256SUMS.txt differ
+Only in src/candidates/vr15/spec_compliant_optimized_v4: STATIC_AUDIT_REPORT.json
