@@ -8,27 +8,57 @@
 **/spark-warehouse/
 **/metastore_db/
 **/derby.log
-
 # Generated benchmark outputs
 **/query_outputs*/
 **/benchmark_outputs*/
 **/correctness_outputs*/
 **/runtime_outputs*/
 **/logs/
-
 # Temporary files
 **/*.tmp
 **/*.temp
 **/*.swp
 **/*~
 **/.ipynb_checkpoints/
-
 # Archives
 *.zip
 *.tar
 *.tar.gz
 *.7z
-
 # Operating system
 .DS_Store
 Thumbs.db
+# Local datasets; managed separately from source code
+/Datasets/
+# Local datasets are managed outside Git
+# Generated distributed data
+**/*.parquet
+**/*.orc
+**/*.avro
+# Generated experiment artifacts
+# Spark and Hadoop temporary outputs
+**/_SUCCESS
+**/.sparkStaging/
+**/.Trash/
+# ============================================================
+# VideoGraphDB generated experiment data — DO NOT COMMIT
+# Spark/Hadoop generated files
+**/*.crc
+# Distributed dataset files
+# Logs
+**/*.log
+# Generated experiment directories
+**/epsilon_correctness/
+**/epsilon_pilot/
+**/witnesses_csv/
+**/comparison/
+# Generated experiment CSV files
+**/part-*.csv
+**/runtime_*.csv
+**/runtime_summary_*.csv
+**/runtime_aggregate_*.csv
+**/runtime_algorithm_*.csv
+**/baseline_vs_proposed_comparison_*.csv
+**/only_baseline.csv
+**/only_proposed.csv
+**/witnesses*.csv
