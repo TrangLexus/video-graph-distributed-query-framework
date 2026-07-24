@@ -1,0 +1,6 @@
+requirement_id,category,title,source_document,source_section,code_locations,test_locations,mandatory,status,notes
+ALG-P-01,algorithm,LocalEval scope,01_algorithm_specification.md,ALG-P-01,,,YES,ACTIVE,
+COR-05,correctness,Normalized witness set equality,05_correctness_requirements.md,COR-05,,,YES,ACTIVE,
+FAIR-01,fairness,Equivalent input and resources,06_baseline_proposed_fairness.md,Section 1,,,YES,ACTIVE,
+MET-C1-01,timing,C1 end-to-end scope,03_experimental_protocol.md,C1,,,YES,ACTIVE,
+MET-C2-01,timing,C2 materialized phase scope,03_experimental_protocol.md,C2,,,YES,ACTIVE,

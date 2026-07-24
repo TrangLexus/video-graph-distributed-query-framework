@@ -1,0 +1,46 @@
+schema_version: 1
+project: VideoGraphDB
+
+spark:
+  master: "spark://master:7077"
+  driver_memory: "2G"
+  executor_memory: "5G"
+  executor_cores: 2
+  cores_max: 8
+  shuffle_partitions: 16
+
+datasets:
+  hdfs_root: "hdfs:///data/videographdb"
+  labels:
+    - dataset_1m
+    - dataset_2m
+    - dataset_4m
+    - dataset_6m
+    - dataset_8m
+    - dataset_10m
+  partition_layout: "by_partition"
+
+temporal:
+  time_window_duration_seconds: 10
+  max_time_gap_seconds: 120
+
+quick_exit:
+  max_seconds: 120
+  exit_person_role: "P1"
+  reference_role: "CARRY2"
+  minimum_partition_count: 1
+
+correctness:
+  require_normalized_set_equality: true
+  reject_missing_runs: true
+  reject_timeouts: true
+  representative_dataset: "dataset_1m"
+
+benchmark:
+  c1_role: "official_end_to_end"
+  c2_role: "profiling_only"
+  full_repeats: 3
+
+notes:
+  - "Query-specific parameters must be declared explicitly."
+  - "Update only through an approved Decision Log entry."

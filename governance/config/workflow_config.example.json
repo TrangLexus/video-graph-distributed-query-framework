@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "project_root": "/home/hduser/VideoGraphDB_Project",
+  "version_dir": "/home/hduser/VideoGraphDB_Project/src/VrXX_replace_me",
+  "parent_version_dir": "/home/hduser/VideoGraphDB_Project/src/VrYY_replace_me",
+  "audit_dir": "audit",
+  "commands": {
+    "static": "python3 -m compileall -q .",
+    "representative_correctness": "",
+    "all_query_correctness": "",
+    "fairness": "",
+    "timing_scope": "",
+    "full_benchmark": ""
+  },
+  "required_for_readiness": [
+    "static",
+    "all_query_correctness",
+    "fairness",
+    "timing_scope"
+  ],
+  "allowed_config_differences": [
+    "algorithm",
+    "algorithm_name",
+    "execution_plan",
+    "output_path",
+    "log_path"
+  ]
+}

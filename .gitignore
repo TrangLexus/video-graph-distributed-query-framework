@@ -1,0 +1,34 @@
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+
+# Spark local artifacts
+**/spark-warehouse/
+**/metastore_db/
+**/derby.log
+
+# Generated benchmark outputs
+**/query_outputs*/
+**/benchmark_outputs*/
+**/correctness_outputs*/
+**/runtime_outputs*/
+**/logs/
+
+# Temporary files
+**/*.tmp
+**/*.temp
+**/*.swp
+**/*~
+**/.ipynb_checkpoints/
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Operating system
+.DS_Store
+Thumbs.db

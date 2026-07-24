@@ -1,0 +1,2 @@
+change_id,file,function_or_section,change_description,reason,requirement_ids,risk_level,impact_correctness,impact_timing,impact_fairness,required_tests,status,evidence
+CHG-001,,,,,,R4,UNKNOWN,UNKNOWN,UNKNOWN,,OPEN,
