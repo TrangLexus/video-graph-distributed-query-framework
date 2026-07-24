@@ -1,0 +1,28 @@
+artifacts
+Code_Vrs
+Code_Vrs chuan
+Code_Vrs_Tung
+Download
+google-chrome-stable_current_amd64.deb
+graph_io_vr15_contextfix.py
+.ipynb_checkpoints
+Quy trinh thuc nghiem va kiem chung
+spec_query_sua-20260723T040153Z-1-001
+spec_query_sua-20260723T040153Z-1-001.zip
+videographdb_vr13.zip
+Vr02_IndexingPartitioning_Eval
+Vr12
+Vr13_official_benchmark_C1
+Vr13_official_benchmark_C1.zip
+Vr13_profile_benchmark_C2
+Vr13_profile_benchmark_C2.zip
+Vr14_official_benchmark_C1.zip
+Vr14_profile_benchmark_C2
+Vr14_profile_benchmark_C2_1.zip
+Vr14_profile_benchmark_C2.zip
+Vr15_complete_fixed_bundle
+Vr15_complete_fixed_bundle.zip
+Vr15_profile_benchmark_C2
+Vr15_profile_benchmark_C2.zip
+Vr15_spec_compliant_optimized_v4
+Vr15_spec_compliant_optimized_v4.zip

@@ -1,0 +1,27 @@
+20K	src/spec_query_sua-20260723T040153Z-1-001.zip
+28K	src/graph_io_vr15_contextfix.py
+64K	src/Download
+64K	src/Vr15_complete_fixed_bundle.zip
+68K	src/Vr14_official_benchmark_C1.zip
+76K	src/Vr14_profile_benchmark_C2.zip
+80K	src/spec_query_sua-20260723T040153Z-1-001
+84K	src/Vr15_spec_compliant_optimized_v4.zip
+124K	src/Vr13_official_benchmark_C1.zip
+124K	src/Vr13_profile_benchmark_C2.zip
+136K	src/artifacts
+208K	src/videographdb_vr13.zip
+220K	src/Vr15_profile_benchmark_C2.zip
+224K	src/Quy trinh thuc nghiem va kiem chung
+272K	src/Vr15_complete_fixed_bundle
+332K	src/Vr15_spec_compliant_optimized_v4
+984K	src/Vr12
+1,5M	src/Vr02_IndexingPartitioning_Eval
+125M	src/google-chrome-stable_current_amd64.deb
+125M	src/Vr14_profile_benchmark_C2_1.zip
+519M	src/Code_Vrs
+771M	src/Vr14_profile_benchmark_C2
+2,3G	src/Code_Vrs chuan
+4,6G	src/Vr15_profile_benchmark_C2
+18G	src/Code_Vrs_Tung
+23G	src/Vr13_profile_benchmark_C2
+53G	src/Vr13_official_benchmark_C1

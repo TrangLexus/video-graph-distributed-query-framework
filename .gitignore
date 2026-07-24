@@ -62,3 +62,11 @@ Thumbs.db
 **/only_baseline.csv
 **/only_proposed.csv
 **/witnesses*.csv
+# Local workspace and quarantined materials
+/workspace/
+# Local legacy source archive
+/archive/
+# Generated experiment results
+/results/
+# Downloaded and packaged source archives
+/packages/source_archives/

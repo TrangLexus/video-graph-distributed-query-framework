@@ -4,11 +4,11 @@
 
 Vr13 được đóng băng dưới dạng một bộ gồm hai thành phần:
 
-1. `src/Vr13_official_benchmark_C1`
+1. `src/reference/vr13/c1_official`
    - Official end-to-end benchmark.
    - Dùng cho runtime chính thức.
 
-2. `src/Vr13_profile_benchmark_C2`
+2. `src/reference/vr13/c2_profile`
    - Profiling benchmark.
    - Dùng phân tích chi phí từng bước.
 
